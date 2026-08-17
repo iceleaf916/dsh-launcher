@@ -9,7 +9,7 @@
 use std::{
     fs,
     net::{SocketAddr, TcpStream},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -31,6 +31,9 @@ const LAUNCHD_LABEL: &str = "com.dsh-tray.web";
 const STATUS_POLL_MS: u64 = 2000;
 
 static AUTOSTART: AtomicBool = AtomicBool::new(false);
+
+/// 托盘菜单句柄（存进 Tauri state，供后台状态轮询线程更新）。
+struct AppMenu(Menu<tauri::Wry>);
 
 // ── 路径工具 ──────────────────────────────────────────────────────────
 
@@ -156,8 +159,11 @@ fn write_plist(run_at_load: bool) -> std::io::Result<()> {
 fn read_autostart_from_plist() -> bool {
     fs::read_to_string(plist_path())
         .map(|xml| {
-            let run = xml.contains("<key>RunAtLoad</key>");
-            run && xml[..xml.find("<key>RunAtLoad</key>").unwrap_or(0)..].contains("<true/>")
+            let marker = "<key>RunAtLoad</key>";
+            match xml.find(marker) {
+                Some(i) => xml[i + marker.len()..].trim_start().starts_with("<true/>"),
+                None => false,
+            }
         })
         .unwrap_or(false)
 }
@@ -293,6 +299,19 @@ fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
+/// 更新菜单项文本（MenuItemKind 枚举按变体转发）。
+fn set_menu_text(menu: &Menu<tauri::Wry>, id: &str, text: &str) {
+    use tauri::menu::MenuItemKind;
+    if let Some(item) = menu.get(id) {
+        match item {
+            MenuItemKind::MenuItem(i) => { let _ = i.set_text(text); }
+            MenuItemKind::Check(i) => { let _ = i.set_text(text); }
+            MenuItemKind::Submenu(i) => { let _ = i.set_text(text); }
+            MenuItemKind::Predefined(_) | MenuItemKind::Icon(_) => {}
+        }
+    }
+}
+
 /// 后台状态轮询：更新托盘 tooltip 与菜单状态行。
 fn spawn_status_poller(app: AppHandle) {
     thread::spawn(move || loop {
@@ -302,12 +321,8 @@ fn spawn_status_poller(app: AppHandle) {
         };
         if let Some(tray) = app.tray_by_id("main") {
             let _ = tray.set_tooltip(Some(text));
-            if let Some(menu) = tray.menu() {
-                if let Ok(item) = menu.get("status") {
-                    let _ = item.set_text(text);
-                }
-            }
         }
+        set_menu_text(&app.state::<AppMenu>().0, "status", text);
         thread::sleep(Duration::from_millis(STATUS_POLL_MS));
     });
 }
@@ -322,6 +337,7 @@ pub fn run() {
             let _ = ensure_plist();
 
             let menu = build_menu(app.handle())?;
+            app.manage(AppMenu(menu.clone()));
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?)
                 .tooltip("dsh-tray")
