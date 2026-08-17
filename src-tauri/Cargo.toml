@@ -1,7 +1,7 @@
 [package]
-name = "dsh-tray"
-version = "0.1.0"
-description = "dsh (DeepSeek Harness) tray manager"
+name = "dsh-launcher"
+version = "0.2.0"
+description = "DSH 启动器（dsh system tray launcher）"
 edition = "2021"
 
 [build-dependencies]

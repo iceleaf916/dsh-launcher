@@ -1,9 +1,9 @@
-// dsh-tray: dsh (DeepSeek Harness) 系统托盘管理器。
+// dsh-launcher: dsh (DeepSeek Harness) 系统托盘管理器。
 //
 // 架构（决策 1/2/3/4）：
 //  - dsh web 进程由 launchd (LaunchAgent) 托管：KeepAlive 崩溃自愈，RunAtLoad 默认关（自启默认关）。
 //  - 本应用是纯托盘控制台（无窗口）：状态轮询 + launchctl 控制 + 菜单。
-//  - 控制面插件 dsh-tray-control 通过 `dsh web --patch <cordis.patch.yml>` 挂载，
+//  - 控制面插件 dsh-control 通过 `dsh web --patch <cordis.patch.yml>` 挂载，
 //    暴露 127.0.0.1:3399 状态/优雅停机端点（零侵入 profile）。
 
 use std::{
@@ -30,8 +30,8 @@ use tauri::{
 
 const WEB_URL: &str = "http://127.0.0.1:3080";
 const WEB_PORT: u16 = 3080;
-const CONTROL_PORT: u16 = 3399; // dsh-tray-control 插件端口
-const LAUNCHD_LABEL: &str = "com.dsh-tray.web";
+const CONTROL_PORT: u16 = 3399; // dsh-control 插件端口
+const LAUNCHD_LABEL: &str = "com.dsh-launcher.web";
 const STATUS_POLL_MS: u64 = 2000;
 
 static AUTOSTART: AtomicBool = AtomicBool::new(false);
@@ -60,7 +60,7 @@ fn open_mode_from_str(s: &str) -> OpenMode {
 }
 
 fn config_path() -> PathBuf {
-    home_dir().join("Library/Application Support/dsh-tray/config.json")
+    home_dir().join("Library/Application Support/dsh-launcher/config.json")
 }
 
 fn load_open_mode() -> OpenMode {
@@ -103,20 +103,20 @@ fn log_path() -> PathBuf {
 }
 
 fn tray_log_path() -> PathBuf {
-    home_dir().join("Library/Logs/dsh-tray.log")
+    home_dir().join("Library/Logs/dsh-launcher.log")
 }
 
-/// 托盘自身日志：追加写入 ~/Library/Logs/dsh-tray.log（不依赖 stderr，GUI 启动可见）。
+/// 托盘自身日志：追加写入 ~/Library/Logs/dsh-launcher.log（不依赖 stderr，GUI 启动可见）。
 fn log_tray(msg: &str) {
     let path = tray_log_path();
-    let line = format!("{} [dsh-tray] {}\n", chrono_now(), msg);
+    let line = format!("{} [dsh-launcher] {}\n", chrono_now(), msg);
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
     let mut f = match fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("dsh-tray: 无法写托盘日志 {}: {e}", path.display());
+            eprintln!("dsh-launcher: 无法写托盘日志 {}: {e}", path.display());
             return;
         }
     };
@@ -180,24 +180,24 @@ fn which(name: &str) -> Option<PathBuf> {
 fn control_dir(app: &AppHandle) -> PathBuf {
     #[cfg(debug_assertions)]
     {
-        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins/dsh-tray-control");
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins/dsh-control");
         if dev.join("lib/index.js").exists() {
             return dev;
         }
     }
-    app.path().resource_dir().unwrap_or_default().join("dsh-tray-control")
+    app.path().resource_dir().unwrap_or_default().join("dsh-control")
 }
 
-/// 控制面 patch 路径：动态生成到 ~/Library/Application Support/dsh-tray/，
+/// 控制面 patch 路径：动态生成到 ~/Library/Application Support/dsh-launcher/，
 /// 内容引用实际插件入口（bundle 内或源码目录），解决打包后绝对路径失效问题。
 fn control_patch_path(app: &AppHandle) -> PathBuf {
-    let dir = home_dir().join("Library/Application Support/dsh-tray");
+    let dir = home_dir().join("Library/Application Support/dsh-launcher");
     let _ = fs::create_dir_all(&dir);
     let patch = dir.join("control.patch.yml");
     let plugin_index = control_dir(app).join("lib/index.js");
     log_tray(&format!("control_patch_path: plugin_index={} patch={}", plugin_index.display(), patch.display()));
     let content = format!(
-        "# 由 dsh-tray 自动生成，请勿手改。\n- insert:\n    - id: dsh-tray-control\n      name: '{}'\n",
+        "# 由 dsh-launcher 自动生成，请勿手改。\n- insert:\n    - id: dsh-control\n      name: '{}'\n",
         plugin_index.to_string_lossy()
     );
     if let Err(e) = fs::write(&patch, content) {
@@ -390,7 +390,7 @@ fn service_restart(app: &AppHandle) {
 fn set_autostart(app: &AppHandle, enabled: bool) {
     AUTOSTART.store(enabled, Ordering::Relaxed);
     if let Err(e) = write_plist(app, enabled) {
-        eprintln!("dsh-tray: 写入 LaunchAgent 失败: {e}");
+        eprintln!("dsh-launcher: 写入 LaunchAgent 失败: {e}");
         log_tray(&format!("set_autostart: 写入失败 {e}"));
     }
     let plist = plist_path().to_string_lossy().into_owned();
@@ -573,7 +573,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
         }
         "restart" => {
             if let Err(e) = ensure_plist(app) {
-                eprintln!("dsh-tray: {e}");
+                eprintln!("dsh-launcher: {e}");
                 log_tray(&format!("restart: ensure_plist 失败 {e}"));
             }
             service_restart(app);
@@ -591,7 +591,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
         "stop" => service_stop(),
         "start" => {
             if let Err(e) = ensure_plist(app) {
-                eprintln!("dsh-tray: {e}");
+                eprintln!("dsh-launcher: {e}");
                 log_tray(&format!("start: ensure_plist 失败 {e}"));
             }
             service_start(app);
@@ -658,7 +658,7 @@ fn spawn_status_poller(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            log_tray("=== dsh-tray 启动 ===");
+            log_tray("=== dsh-launcher 启动 ===");
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -671,7 +671,7 @@ pub fn run() {
                 Ordering::Relaxed,
             );
             if let Err(e) = ensure_plist(app.handle()) {
-                eprintln!("dsh-tray: {e}");
+                eprintln!("dsh-launcher: {e}");
                 log_tray(&format!("setup: ensure_plist 失败 {e}"));
             }
 
@@ -690,7 +690,7 @@ pub fn run() {
             app.manage(AppMenu(menu.clone()));
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?)
-                .tooltip("dsh-tray")
+                .tooltip("DSH启动器")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| handle_menu(app, event.id.as_ref()))
@@ -702,5 +702,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running dsh-tray");
+        .expect("error while running dsh-launcher");
 }

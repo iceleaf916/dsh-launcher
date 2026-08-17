@@ -1,4 +1,4 @@
-// dsh-tray-control: dsh (DeepSeek Harness) 控制面插件。
+// dsh-control: dsh (DeepSeek Harness) 控制面插件。
 //
 // 挂载方式（零侵入，不动 ~/.dsh/profiles/web）：
 //   dsh --profile web --patch <本目录>/cordis.patch.yml
@@ -10,11 +10,11 @@
 
 import { createServer } from "node:http";
 
-export const name = "dsh-tray-control";
+export const name = "dsh-control";
 
 const PORT = 3399;
 const HOST = "127.0.0.1";
-const log = (level, msg) => console[level]?.("[dsh-tray-control] " + msg);
+const log = (level, msg) => console[level]?.("[dsh-control] " + msg);
 
 export function apply(ctx) {
   const startedAt = Date.now();
@@ -30,7 +30,7 @@ export function apply(ctx) {
       const webPort = ctx.get("webServer")?.port;
       json(200, {
         ok: true,
-        service: "dsh-tray-control",
+        service: "dsh-control",
         pid: process.pid,
         node: process.version,
         uptimeMs: Date.now() - startedAt,
@@ -89,5 +89,5 @@ export function apply(ctx) {
   // Cordis 清理回调统一走 ctx.effect（返回 disposer）
   ctx.effect(() => () => {
     server.close();
-  }, "dsh-tray-control: http server");
+  }, "dsh-control: http server");
 }

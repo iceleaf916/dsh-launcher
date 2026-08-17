@@ -1,6 +1,6 @@
 {
-  "name": "dsh-tray",
-  "version": "0.1.0",
+  "name": "dsh-launcher",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
