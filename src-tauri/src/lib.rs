@@ -477,6 +477,8 @@ fn open_dsh_ui(app: &AppHandle) {
 /// 内置浏览器：WebviewWindow 加载 dsh web 界面（无系统 chrome，可复用）。
 fn open_builtin(app: &AppHandle) {
     log_tray("open_dsh_ui: 使用内置浏览器");
+    // 内置窗口需要成为普通前台窗口（可 Cmd+Tab 切换）：从 Accessory 临时切到 Regular。
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     // 已有窗口则聚焦；没有则创建。
     if let Some(win) = app.get_webview_window("dsh-ui") {
         let _ = win.show();
@@ -497,6 +499,9 @@ fn open_builtin(app: &AppHandle) {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = win2.hide();
+                    // 窗口隐藏后恢复纯托盘（Accessory），不再占据 Dock / Cmd+Tab。
+                    let app = win2.app_handle();
+                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
                 }
             });
             let _ = win.show();
