@@ -10,7 +10,7 @@ jobs:
   check-linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux dependencies
         run: |
@@ -28,10 +28,12 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Setup Node & pnpm
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -46,7 +48,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux dependencies
         run: |
@@ -64,10 +66,12 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Setup Node & pnpm
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
