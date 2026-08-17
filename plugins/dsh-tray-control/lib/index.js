@@ -6,20 +6,18 @@
 // 暴露端点（仅绑定 127.0.0.1）：
 //   GET  /status    -> { ok, pid, node, uptimeMs, webPort, webUrl, profile }
 //   POST /shutdown  -> 优雅退出整个 dsh 进程（走 dsh 的 appExit 服务）
-//   POST /reload    -> 热重载（v1 占位，后续实现 loader 整树重载）
+//   POST /reload    -> 整树热重载（include.refresh()，与 dsh 的 hmr 同路径）
 
 import { createServer } from "node:http";
 
 export const name = "dsh-tray-control";
 
-export const inject = ["webServer"];
-
 const PORT = 3399;
 const HOST = "127.0.0.1";
+const log = (level, msg) => console[level]?.("[dsh-tray-control] " + msg);
 
 export function apply(ctx) {
   const startedAt = Date.now();
-  const logger = ctx.logger ?? console;
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
@@ -55,19 +53,41 @@ export function apply(ctx) {
     }
 
     if (req.method === "POST" && url.pathname === "/reload") {
-      json(501, { ok: false, message: "hot reload not implemented yet (v1 placeholder)" });
+      // 先响应（整树重载会 dispose 并重建本插件自身，HTTP 连接可能在重载中断开），
+      // 再异步触发 include.refresh()（dsh 的整树热重载入口，与 hmr 改配置同路径）。
+      json(200, { ok: true, message: "hot reload accepted, reloading tree" });
+      setImmediate(async () => {
+        try {
+          const loader = ctx.get("loader");
+          if (!loader) throw new Error("loader service unavailable");
+          let reloaded = false;
+          for (const entry of loader.entries()) {
+            const include = entry.subtree;
+            if (include?.refresh) {
+              await include.refresh();
+              reloaded = true;
+              break;
+            }
+          }
+          if (reloaded) log("info", "hot reload completed");
+          else log("warn", "hot reload skipped — no include entry found");
+        } catch (err) {
+          log("warn", "hot reload failed: " + (err?.message ?? err));
+        }
+      });
       return;
     }
 
     json(404, { ok: false, message: "not found" });
   });
 
-  server.on("error", (err) => logger.warn("dsh-tray-control server error: %s", err.message));
+  server.on("error", (err) => log("warn", "server error: " + err.message));
   server.listen(PORT, HOST, () => {
-    logger.info("dsh-tray-control listening on http://%s:%d", HOST, PORT);
+    log("info", "listening on http://" + HOST + ":" + PORT);
   });
 
-  ctx.onDispose(() => {
+  // Cordis 清理回调统一走 ctx.effect（返回 disposer）
+  ctx.effect(() => () => {
     server.close();
-  });
+  }, "dsh-tray-control: http server");
 }

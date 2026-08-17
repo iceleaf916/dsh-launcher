@@ -77,22 +77,18 @@ fn which(name: &str) -> Option<PathBuf> {
     if p.as_os_str().is_empty() { None } else { Some(p) }
 }
 
-/// 控制面插件目录：dev 优先源码目录（存在即用），打包后回退 bundle 资源目录。
+/// 控制面插件目录。
+/// - debug 构建（开发）：优先源码目录（编译期路径，release 二进制不含）。
+/// - release 构建（发布）：一律从 .app 资源目录解析。
 fn control_dir(app: &AppHandle) -> PathBuf {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins/dsh-tray-control");
-    if dev.join("lib/index.js").exists() {
-        return dev;
+    #[cfg(debug_assertions)]
+    {
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins/dsh-tray-control");
+        if dev.join("lib/index.js").exists() {
+            return dev;
+        }
     }
-    let bundled = app
-        .path()
-        .resource_dir()
-        .unwrap_or_default()
-        .join("dsh-tray-control");
-    if bundled.join("lib/index.js").exists() {
-        bundled
-    } else {
-        dev
-    }
+    app.path().resource_dir().unwrap_or_default().join("dsh-tray-control")
 }
 
 /// 控制面 patch 路径：动态生成到 ~/Library/Application Support/dsh-tray/，
@@ -111,22 +107,19 @@ fn control_patch_path(app: &AppHandle) -> PathBuf {
 }
 
 /// [node, dsh_bin, --profile, web, --patch, <控制面 patch 路径>]
-fn dsh_program(app: &AppHandle) -> Vec<String> {
-    let node = which("node").unwrap_or_else(|| {
-        PathBuf::from("/Users/iceleaf/.nvm/versions/node/v24.18.0/bin/node")
-    });
-    let dsh = which("dsh").unwrap_or_else(|| {
-        PathBuf::from("/Users/iceleaf/.nvm/versions/node/v24.18.0/bin/dsh")
-    });
+/// node/dsh 一律运行时解析（PATH），解析失败返回错误——不写死任何安装路径。
+fn dsh_program(app: &AppHandle) -> Result<Vec<String>, String> {
+    let node = which("node").ok_or_else(|| "node 不在 PATH，无法生成 LaunchAgent".to_string())?;
+    let dsh = which("dsh").ok_or_else(|| "dsh 不在 PATH，无法生成 LaunchAgent".to_string())?;
     let patch = control_patch_path(app);
-    vec![
+    Ok(vec![
         node.to_string_lossy().into_owned(),
         dsh.to_string_lossy().into_owned(),
         "--profile".into(),
         "web".into(),
         "--patch".into(),
         patch.to_string_lossy().into_owned(),
-    ]
+    ])
 }
 
 // ── plist 生成（LaunchAgent） ─────────────────────────────────────────
@@ -135,15 +128,15 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn plist_xml(app: &AppHandle, run_at_load: bool) -> String {
-    let program = dsh_program(app);
+fn plist_xml(app: &AppHandle, run_at_load: bool) -> Result<String, String> {
+    let program = dsh_program(app)?;
     let args = program
         .iter()
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("
 ");
-    format!(
+    Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -169,22 +162,28 @@ fn plist_xml(app: &AppHandle, run_at_load: bool) -> String {
         args = args,
         run_at_load = if run_at_load { "true" } else { "false" },
         log = xml_escape(&log_path().to_string_lossy()),
-    )
+    ))
 }
 
-fn ensure_plist(app: &AppHandle) -> std::io::Result<()> {
+fn ensure_plist(app: &AppHandle) -> Result<(), String> {
     let path = plist_path();
     if !path.exists() {
-        if let Some(dir) = path.parent() { fs::create_dir_all(dir)?; }
-        fs::write(&path, plist_xml(app, AUTOSTART.load(Ordering::Relaxed)))?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let xml = plist_xml(app, AUTOSTART.load(Ordering::Relaxed))?;
+        fs::write(&path, xml).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-fn write_plist(app: &AppHandle, run_at_load: bool) -> std::io::Result<()> {
+fn write_plist(app: &AppHandle, run_at_load: bool) -> Result<(), String> {
     let path = plist_path();
-    if let Some(dir) = path.parent() { fs::create_dir_all(dir)?; }
-    fs::write(&path, plist_xml(app, run_at_load))
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let xml = plist_xml(app, run_at_load)?;
+    fs::write(&path, xml).map_err(|e| e.to_string())
 }
 
 /// 从已存在的 plist 读取 RunAtLoad（自启状态）。
@@ -235,7 +234,9 @@ fn service_restart() {
 /// 自启开关：重写 plist 的 RunAtLoad 并重新装载；服务保持运行。
 fn set_autostart(app: &AppHandle, enabled: bool) {
     AUTOSTART.store(enabled, Ordering::Relaxed);
-    let _ = write_plist(app, enabled);
+    if let Err(e) = write_plist(app, enabled) {
+        eprintln!("dsh-tray: 写入 LaunchAgent 失败: {e}");
+    }
     let plist = plist_path().to_string_lossy().into_owned();
     let _ = launchctl(&["bootout", &gui_target(), &plist]);
     let _ = launchctl(&["bootstrap", &gui_target(), &plist]);
@@ -312,9 +313,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 fn handle_menu(app: &AppHandle, id: &str) {
     match id {
         "open" => open_url(WEB_URL),
-        "restart" => { let _ = ensure_plist(app); service_restart(); }
+        "restart" => {
+            if let Err(e) = ensure_plist(app) { eprintln!("dsh-tray: {e}"); }
+            service_restart();
+        }
         "stop" => service_stop(),
-        "start" => { let _ = ensure_plist(app); service_start(); }
+        "start" => {
+            if let Err(e) = ensure_plist(app) { eprintln!("dsh-tray: {e}"); }
+            service_start();
+        }
         "autostart" => {
             let next = !AUTOSTART.load(Ordering::Relaxed);
             set_autostart(app, next);
@@ -366,7 +373,9 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             AUTOSTART.store(read_autostart_from_plist(), Ordering::Relaxed);
-            let _ = ensure_plist(app.handle());
+            if let Err(e) = ensure_plist(app.handle()) {
+                eprintln!("dsh-tray: {e}");
+            }
 
             let menu = build_menu(app.handle())?;
             app.manage(AppMenu(menu.clone()));

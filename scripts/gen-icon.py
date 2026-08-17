@@ -26,5 +26,7 @@ for y in ys:
     d.rounded_rectangle([x0, y, x0 + bar_w, y + bar_h], radius=28, fill=c)
 # 底部托盘底座
 d.rounded_rectangle([x0 + 60, 792, x0 + bar_w - 60, 852], radius=30, fill=c)
-img.save("/Users/iceleaf/Workspaces/dsh/dsh-tray/src-tauri/icons/app-icon.png")
+import pathlib
+out = pathlib.Path(__file__).resolve().parent.parent / "src-tauri" / "icons" / "app-icon.png"
+img.save(out)
 print("saved")

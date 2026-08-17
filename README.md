@@ -54,14 +54,14 @@ dsh-tray/
 │   └── icons/                # 全套图标（gen-icon.py 生成源图）
 ├── src/index.html            # 前端占位（无窗口，永不渲染）
 ├── plugins/dsh-tray-control/ # dsh 控制面插件（打包为 .app 资源；dev 直接引用源码目录）
-│   ├── lib/index.js          # GET /status · POST /shutdown · POST /reload(占位)
+│   ├── lib/index.js          # GET /status · POST /shutdown · POST /reload(整树热重载)
 │   └── cordis.patch.yml      # dev 模式挂载清单（打包后由运行时动态生成 patch）
 └── scripts/gen-icon.py       # 图标源图生成（uv + Pillow）
 ```
 
 ## 待办（后续迭代）
 
-- [ ] 控制面 `/reload`：实现 loader 整树热重载（web profile 的 hmr 仍 disabled，需验证）
+- [ ] 控制面 `/reload` 增强：插件代码变更后的模块级热更新（当前为配置级整树重载，Node ESM 缓存使插件代码变更需冷重启）
 - [ ] 托盘图标随状态变色（运行中/已停止）
 - [ ] 日志面板（尾随 ~/Library/Logs/dsh-web.log）
 - [ ] Windows / Linux 适配（launchctl → sc.exe / systemd）
