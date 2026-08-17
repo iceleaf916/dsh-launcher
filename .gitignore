@@ -1,0 +1,16 @@
+# Node
+node_modules/
+dist/
+*.local
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# macOS
+.DS_Store
+*.dmg
+
+# logs
+*.log
