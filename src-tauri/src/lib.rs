@@ -429,6 +429,13 @@ pub fn run() {
                 eprintln!("dsh-tray: {e}");
             }
 
+            // 打开托盘即确保 dsh 运行：web 端口与控制面端口均不可达时自动拉起。
+            // （已运行则跳过；启动是异步的，状态行先给反馈，轮询会跟进真实状态）
+            if !port_open(WEB_PORT) && !port_open(CONTROL_PORT) {
+                service_start();
+                show_action_msg("dsh 未运行，已自动启动".to_string());
+            }
+
             let menu = build_menu(app.handle())?;
             app.manage(AppMenu(menu.clone()));
             let _tray = TrayIconBuilder::with_id("main")

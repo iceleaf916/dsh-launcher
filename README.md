@@ -10,6 +10,7 @@ dsh（DeepSeek Harness）的系统托盘管理器，让 `dsh --profile web` 常�
 | UI 形态 | **纯托盘菜单**（无窗口） |
 | 控制面插件挂载 | **`--patch` 零侵入**（不改 `~/.dsh/profiles/web`） |
 | 开机自启 | **默认关闭**（菜单里手动开关） |
+| 托盘启动行为 | **打开托盘即自动拉起 dsh**（若未运行；已运行则跳过） |
 
 ```mermaid
 flowchart LR
