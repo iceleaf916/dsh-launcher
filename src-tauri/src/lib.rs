@@ -8,12 +8,16 @@
 
 use std::{
     fs,
+    io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     process::Command,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::{
@@ -254,6 +258,40 @@ fn port_open(port: u16) -> bool {
 
 enum DshStatus { Running, Stopped }
 
+/// 菜单状态行的临时动作消息（显示约 3 秒后被轮询状态覆盖）。
+static LAST_ACTION_MSG: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+fn show_action_msg(msg: String) {
+    if let Ok(mut guard) = LAST_ACTION_MSG.lock() {
+        *guard = Some((msg, Instant::now()));
+    }
+}
+
+/// 向控制面插件发 POST（当前仅 /reload；连接失败视为 dsh 未运行或插件未挂载）。
+fn control_post(path: &str) -> Result<String, String> {
+    let addr: SocketAddr = format!("127.0.0.1:{CONTROL_PORT}").parse().unwrap();
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
+        .map_err(|e| format!("控制面不可达（dsh 未运行或插件未挂载）: {e}"))?;
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{CONTROL_PORT}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status_line = text.lines().next().unwrap_or("").to_string();
+    let code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if (200..300).contains(&code) {
+        Ok(status_line)
+    } else {
+        Err(format!("控制面返回 {status_line}"))
+    }
+}
+
 fn probe_status() -> DshStatus {
     // 控制面端口在则 dsh 一定在；兜底看 web 端口。
     if port_open(CONTROL_PORT) || port_open(WEB_PORT) {
@@ -280,6 +318,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let status = MenuItem::with_id(app, "status", "dsh: 检测中…", true, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "打开 Web 界面", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh", true, None::<&str>)?;
+    let reload = MenuItem::with_id(app, "reload", "热重载 dsh（控制面）", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止 dsh", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动 dsh", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
@@ -299,6 +338,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &open,
             &PredefinedMenuItem::separator(app)?,
             &restart,
+            &reload,
             &stop,
             &start,
             &PredefinedMenuItem::separator(app)?,
@@ -317,6 +357,10 @@ fn handle_menu(app: &AppHandle, id: &str) {
             if let Err(e) = ensure_plist(app) { eprintln!("dsh-tray: {e}"); }
             service_restart();
         }
+        "reload" => match control_post("/reload") {
+            Ok(_) => show_action_msg("热重载：已触发".to_string()),
+            Err(e) => show_action_msg(format!("热重载失败：{e}")),
+        },
         "stop" => service_stop(),
         "start" => {
             if let Err(e) = ensure_plist(app) { eprintln!("dsh-tray: {e}"); }
@@ -354,14 +398,22 @@ fn set_menu_text(menu: &Menu<tauri::Wry>, id: &str, text: &str) {
 /// 后台状态轮询：更新托盘 tooltip 与菜单状态行。
 fn spawn_status_poller(app: AppHandle) {
     thread::spawn(move || loop {
-        let text = match probe_status() {
-            DshStatus::Running => "dsh: 运行中",
-            DshStatus::Stopped => "dsh: 已停止",
+        let msg = LAST_ACTION_MSG
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(3));
+        let text = match msg {
+            Some((text, _)) => text,
+            None => match probe_status() {
+                DshStatus::Running => "dsh: 运行中".to_string(),
+                DshStatus::Stopped => "dsh: 已停止".to_string(),
+            },
         };
         if let Some(tray) = app.tray_by_id("main") {
-            let _ = tray.set_tooltip(Some(text));
+            let _ = tray.set_tooltip(Some(&text));
         }
-        set_menu_text(&app.state::<AppMenu>().0, "status", text);
+        set_menu_text(&app.state::<AppMenu>().0, "status", &text);
         thread::sleep(Duration::from_millis(STATUS_POLL_MS));
     });
 }
