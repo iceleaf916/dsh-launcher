@@ -23,7 +23,7 @@ use std::{
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 // ── 常量 ──────────────────────────────────────────────────────────────
@@ -35,6 +35,55 @@ const LAUNCHD_LABEL: &str = "com.dsh-tray.web";
 const STATUS_POLL_MS: u64 = 2000;
 
 static AUTOSTART: AtomicBool = AtomicBool::new(false);
+
+/// 打开 dsh 界面方式：system=系统浏览器；builtin=托盘内置浏览器。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    System,
+    Builtin,
+}
+
+impl OpenMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            OpenMode::System => "system",
+            OpenMode::Builtin => "builtin",
+        }
+    }
+}
+
+fn open_mode_from_str(s: &str) -> OpenMode {
+    match s {
+        "builtin" => OpenMode::Builtin,
+        _ => OpenMode::System,
+    }
+}
+
+fn config_path() -> PathBuf {
+    home_dir().join("Library/Application Support/dsh-tray/config.json")
+}
+
+fn load_open_mode() -> OpenMode {
+    let raw = fs::read_to_string(config_path()).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("open_mode").and_then(|m| m.as_str()).map(open_mode_from_str))
+        .unwrap_or(OpenMode::System)
+}
+
+fn save_open_mode(mode: OpenMode) {
+    let value = serde_json::json!({ "open_mode": mode.as_str() });
+    if let Some(dir) = config_path().parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Err(e) = fs::write(config_path(), serde_json::to_string_pretty(&value).unwrap_or_default()) {
+        log_tray(&format!("save_open_mode: 写入失败 {e}"));
+    } else {
+        log_tray(&format!("save_open_mode: open_mode={}", mode.as_str()));
+    }
+}
+
+static OPEN_MODE: AtomicBool = AtomicBool::new(false); // false=system, true=builtin
 
 /// 托盘菜单句柄（存进 Tauri state，供后台状态轮询线程更新）。
 struct AppMenu(Menu<tauri::Wry>);
@@ -415,11 +464,64 @@ fn open_url(url: &str) {
 #[cfg(target_os = "linux")]
 fn open_url(url: &str) { let _ = Command::new("xdg-open").arg(url).spawn(); }
 
+/// 打开 dsh 界面：按配置走系统浏览器或内置 WebView。
+fn open_dsh_ui(app: &AppHandle) {
+    if OPEN_MODE.load(Ordering::Relaxed) {
+        open_builtin(app);
+    } else {
+        log_tray("open_dsh_ui: 使用系统浏览器");
+        open_url(WEB_URL);
+    }
+}
+
+/// 内置浏览器：WebviewWindow 加载 dsh web 界面（无系统 chrome，可复用）。
+fn open_builtin(app: &AppHandle) {
+    log_tray("open_dsh_ui: 使用内置浏览器");
+    // 已有窗口则聚焦；没有则创建。
+    if let Some(win) = app.get_webview_window("dsh-ui") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        log_tray("open_builtin: 复用已有窗口");
+        return;
+    }
+    match WebviewWindowBuilder::new(app, "dsh-ui", WebviewUrl::External(WEB_URL.parse().unwrap()))
+        .title("dsh 界面")
+        .inner_size(1100.0, 760.0)
+        .build()
+    {
+        Ok(win) => {
+            log_tray("open_builtin: 内置窗口已创建");
+            // 关闭窗口只隐藏，不让应用退出（纯托盘应用语义）。
+            let win2 = win.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = win2.hide();
+                }
+            });
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        Err(e) => {
+            log_tray(&format!("open_builtin: 创建窗口失败 {e}"));
+            open_url(WEB_URL);
+        }
+    }
+}
+
 // ── 托盘 ──────────────────────────────────────────────────────────────
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let status = MenuItem::with_id(app, "status", "dsh: 检测中…", true, None::<&str>)?;
-    let open = MenuItem::with_id(app, "open", "打开 Web 界面", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "打开 dsh 界面", true, None::<&str>)?;
+    let builtin = CheckMenuItem::with_id(
+        app,
+        "open-builtin",
+        "内置浏览器打开",
+        true,
+        OPEN_MODE.load(Ordering::Relaxed),
+        None::<&str>,
+    )?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh", true, None::<&str>)?;
     let reload = MenuItem::with_id(app, "reload", "热重载 dsh（控制面）", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止 dsh", true, None::<&str>)?;
@@ -439,6 +541,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &status,
             &open,
+            &builtin,
             &PredefinedMenuItem::separator(app)?,
             &restart,
             &reload,
@@ -456,7 +559,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 fn handle_menu(app: &AppHandle, id: &str) {
     log_tray(&format!("menu: {id}"));
     match id {
-        "open" => open_url(WEB_URL),
+        "open" => open_dsh_ui(app),
+        "open-builtin" => {
+            let next = !OPEN_MODE.load(Ordering::Relaxed);
+            OPEN_MODE.store(next, Ordering::Relaxed);
+            save_open_mode(if next { OpenMode::Builtin } else { OpenMode::System });
+            log_tray(&format!("open-builtin: 切换为 {}", if next { "内置" } else { "系统" }));
+        }
         "restart" => {
             if let Err(e) = ensure_plist(app) {
                 eprintln!("dsh-tray: {e}");
@@ -549,6 +658,13 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             AUTOSTART.store(read_autostart_from_plist(), Ordering::Relaxed);
+            OPEN_MODE.store(
+                match load_open_mode() {
+                    OpenMode::Builtin => true,
+                    OpenMode::System => false,
+                },
+                Ordering::Relaxed,
+            );
             if let Err(e) = ensure_plist(app.handle()) {
                 eprintln!("dsh-tray: {e}");
                 log_tray(&format!("setup: ensure_plist 失败 {e}"));
