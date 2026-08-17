@@ -1,0 +1,12 @@
+# dsh-tray-control 控制面插件挂载文件。
+#
+# 用法（零侵入：不改 ~/.dsh/profiles/web 的任何文件）：
+#   dsh --profile web --patch /Users/iceleaf/Workspaces/dsh/dsh-tray/plugins/dsh-tray-control/cordis.patch.yml
+#
+# 说明：
+#  - name 使用插件入口的绝对路径；dsh 的 root include 会把绝对路径转成 file: URL 加载
+#    （dsh-app-boot mountRootInclude: isAbsolute(name) -> pathToFileURL(name).href）。
+#  - 路径是本机的；如移动项目，同步修改这里的路径。
+- insert:
+    - id: dsh-tray-control
+      name: '/Users/iceleaf/Workspaces/dsh/dsh-tray/plugins/dsh-tray-control/lib/index.js'

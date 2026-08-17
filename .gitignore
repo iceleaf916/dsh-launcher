@@ -14,3 +14,10 @@ src-tauri/gen/
 
 # logs
 *.log
+
+# local tooling caches (uv / pnpm / cargo, sandbox-friendly)
+.venv/
+.uv-cache/
+.pnpm-store/
+.npm-cache/
+.cargo-home/

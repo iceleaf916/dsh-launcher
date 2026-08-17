@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "dsh-tray 托盘应用默认能力（无窗口、无前端 IPC）",
+  "windows": [],
+  "permissions": []
+}
