@@ -53,6 +53,50 @@ fn log_path() -> PathBuf {
     home_dir().join("Library/Logs/dsh-web.log")
 }
 
+fn tray_log_path() -> PathBuf {
+    home_dir().join("Library/Logs/dsh-tray.log")
+}
+
+/// 托盘自身日志：追加写入 ~/Library/Logs/dsh-tray.log（不依赖 stderr，GUI 启动可见）。
+fn log_tray(msg: &str) {
+    let path = tray_log_path();
+    let line = format!("{} [dsh-tray] {}\n", chrono_now(), msg);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let mut f = match fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("dsh-tray: 无法写托盘日志 {}: {e}", path.display());
+            return;
+        }
+    };
+    let _ = f.write_all(line.as_bytes());
+    let _ = f.flush();
+}
+
+/// 当前时间戳，用于日志行。
+fn chrono_now() -> String {
+    // 避免引入 chrono 依赖：用 date 命令取本地时间。
+    if let Ok(out) = Command::new("date").arg("+%Y-%m-%d %H:%M:%S").output() {
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+    }
+    "1970-01-01 00:00:00".to_string()
+}
+
+/// 记录 launchctl 命令及其 stdout/stderr（截断），便于排查启动链路。
+fn launchctl_logged(args: &[&str]) -> std::io::Result<std::process::Output> {
+    log_tray(&format!("launchctl {}", args.join(" ")));
+    let out = Command::new("launchctl").args(args).output()?;
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    log_tray(&format!("launchctl {} -> exit {code} stdout={stdout:?} stderr={stderr:?}", args.join(" ")));
+    Ok(out)
+}
+
 fn uid() -> String {
     Command::new("id")
         .arg("-u")
@@ -102,11 +146,14 @@ fn control_patch_path(app: &AppHandle) -> PathBuf {
     let _ = fs::create_dir_all(&dir);
     let patch = dir.join("control.patch.yml");
     let plugin_index = control_dir(app).join("lib/index.js");
+    log_tray(&format!("control_patch_path: plugin_index={} patch={}", plugin_index.display(), patch.display()));
     let content = format!(
         "# 由 dsh-tray 自动生成，请勿手改。\n- insert:\n    - id: dsh-tray-control\n      name: '{}'\n",
         plugin_index.to_string_lossy()
     );
-    let _ = fs::write(&patch, content);
+    if let Err(e) = fs::write(&patch, content) {
+        log_tray(&format!("control_patch_path: 写入失败 {e}"));
+    }
     patch
 }
 
@@ -116,14 +163,16 @@ fn dsh_program(app: &AppHandle) -> Result<Vec<String>, String> {
     let node = which("node").ok_or_else(|| "node 不在 PATH，无法生成 LaunchAgent".to_string())?;
     let dsh = which("dsh").ok_or_else(|| "dsh 不在 PATH，无法生成 LaunchAgent".to_string())?;
     let patch = control_patch_path(app);
-    Ok(vec![
+    let program = vec![
         node.to_string_lossy().into_owned(),
         dsh.to_string_lossy().into_owned(),
         "--profile".into(),
         "web".into(),
         "--patch".into(),
         patch.to_string_lossy().into_owned(),
-    ])
+    ];
+    log_tray(&format!("dsh_program: node={} dsh={} patch={}", node.display(), dsh.display(), patch.display()));
+    Ok(program)
 }
 
 // ── plist 生成（LaunchAgent） ─────────────────────────────────────────
@@ -132,7 +181,7 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn plist_xml(app: &AppHandle, run_at_load: bool) -> Result<String, String> {
+fn plist_xml(app: &AppHandle, run_at_load: bool, keep_alive: bool) -> Result<String, String> {
     let program = dsh_program(app)?;
     let args = program
         .iter()
@@ -152,7 +201,7 @@ fn plist_xml(app: &AppHandle, run_at_load: bool) -> Result<String, String> {
 {args}
   </array>
   <key>KeepAlive</key>
-  <true/>
+  <{keep_alive}/>
   <key>RunAtLoad</key>
   <{run_at_load}/>
   <key>StandardOutPath</key>
@@ -164,6 +213,7 @@ fn plist_xml(app: &AppHandle, run_at_load: bool) -> Result<String, String> {
 "#,
         label = LAUNCHD_LABEL,
         args = args,
+        keep_alive = if keep_alive { "true" } else { "false" },
         run_at_load = if run_at_load { "true" } else { "false" },
         log = xml_escape(&log_path().to_string_lossy()),
     ))
@@ -171,12 +221,17 @@ fn plist_xml(app: &AppHandle, run_at_load: bool) -> Result<String, String> {
 
 fn ensure_plist(app: &AppHandle) -> Result<(), String> {
     let path = plist_path();
+    log_tray(&format!("ensure_plist: path={} exists={}", path.display(), path.exists()));
     if !path.exists() {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let xml = plist_xml(app, AUTOSTART.load(Ordering::Relaxed))?;
-        fs::write(&path, xml).map_err(|e| e.to_string())?;
+        let xml = plist_xml(app, AUTOSTART.load(Ordering::Relaxed), true)?;
+        if let Err(e) = fs::write(&path, &xml) {
+            log_tray(&format!("ensure_plist: 写入失败 {e}"));
+            return Err(e.to_string());
+        }
+        log_tray(&format!("ensure_plist: 已写入 plist ({})", xml.len()));
     }
     Ok(())
 }
@@ -186,8 +241,29 @@ fn write_plist(app: &AppHandle, run_at_load: bool) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let xml = plist_xml(app, run_at_load)?;
-    fs::write(&path, xml).map_err(|e| e.to_string())
+    let xml = plist_xml(app, run_at_load, true)?;
+    if let Err(e) = fs::write(&path, &xml) {
+        log_tray(&format!("write_plist: 写入失败 {e}"));
+        return Err(e.to_string());
+    }
+    log_tray(&format!("write_plist: 已写入 plist run_at_load={run_at_load} ({})", xml.len()));
+    Ok(())
+}
+
+/// 停止时把现有 plist 的 KeepAlive 改为 false（纯文本替换，不重新解析 PATH）。
+fn write_plist_keepalive_off() -> Result<(), String> {
+    let path = plist_path();
+    let xml = fs::read_to_string(&path).map_err(|e| format!("读取 plist 失败: {e}"))?;
+    let marker = "<key>KeepAlive</key>";
+    let pos = xml.find(marker).ok_or_else(|| "plist 缺少 KeepAlive 字段".to_string())?;
+    let rest = &xml[pos + marker.len()..];
+    let value_start = rest.find('<').ok_or_else(|| "plist KeepAlive 值缺失".to_string())?;
+    let value_end = rest[value_start..].find('>').map(|i| value_start + i + 1)
+        .ok_or_else(|| "plist KeepAlive 值格式异常".to_string())?;
+    let new_xml = format!("{}{}<false/>{}", &xml[..pos + marker.len()], "", &rest[value_end..]);
+    fs::write(&path, new_xml).map_err(|e| format!("写入 plist 失败: {e}"))?;
+    log_tray("write_plist_keepalive_off: 已把 KeepAlive 改为 false（文本替换）");
+    Ok(())
 }
 
 /// 从已存在的 plist 读取 RunAtLoad（自启状态）。
@@ -205,34 +281,60 @@ fn read_autostart_from_plist() -> bool {
 
 // ── launchctl 控制 ────────────────────────────────────────────────────
 
-fn launchctl(args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("launchctl").args(args).output()
-}
-
 fn service_is_running() -> bool {
-    match launchctl(&["print", &service_target()]) {
-        Ok(o) => o.status.success()
-            && String::from_utf8_lossy(&o.stdout).contains("state = running"),
+    match launchctl_logged(&["print", &service_target()]) {
+        Ok(o) => {
+            let running = o.status.success()
+                && String::from_utf8_lossy(&o.stdout).contains("state = running");
+            log_tray(&format!("service_is_running: {running}"));
+            running
+        }
         Err(_) => false,
     }
 }
 
 /// 启动：卸载（忽略不存在）→ 装载 → 立即启动一次。
-fn service_start() {
+fn service_start(app: &AppHandle) {
     let plist = plist_path().to_string_lossy().into_owned();
-    let _ = launchctl(&["bootout", &gui_target(), &plist]);
-    let _ = launchctl(&["bootstrap", &gui_target(), &plist]);
-    let _ = launchctl(&["kickstart", &service_target()]);
+    log_tray("service_start: begin");
+    // 恢复 KeepAlive=true（若之前停止时被禁用）。
+    if let Err(e) = write_plist(app, AUTOSTART.load(Ordering::Relaxed)) {
+        log_tray(&format!("service_start: 写 KeepAlive=true plist 失败 {e}"));
+    }
+    let _ = launchctl_logged(&["bootout", &gui_target(), &plist]);
+    let _ = launchctl_logged(&["bootstrap", &gui_target(), &plist]);
+    let _ = launchctl_logged(&["kickstart", &service_target()]);
+    log_tray("service_start: end");
 }
 
 /// 停止：SIGTERM 优雅退出（dsh 自带 SIGTERM 处理）。
 fn service_stop() {
-    let _ = launchctl(&["kill", "SIGTERM", &service_target()]);
+    log_tray("service_stop: begin");
+    // 停止语义（方案 2）：临时禁用 KeepAlive，再 SIGTERM，避免 launchd 立即自愈拉起。
+    // 先卸载再装载（让 KeepAlive=false 生效），随后 kill；若进程已退出则忽略错误。
+    let plist = plist_path().to_string_lossy().into_owned();
+    let _ = launchctl_logged(&["bootout", &gui_target(), &plist]);
+    if let Err(e) = write_plist_keepalive_off() {
+        log_tray(&format!("service_stop: 写 KeepAlive=false plist 失败 {e}"));
+    }
+    let _ = launchctl_logged(&["bootstrap", &gui_target(), &plist]);
+    // bootstrap 后服务会按 KeepAlive=false 停留在未运行状态，无需再 kill；
+    // 若进程仍在（竞态），补一次 SIGTERM 兜底。
+    if service_is_running() {
+        let _ = launchctl_logged(&["kill", "SIGTERM", &service_target()]);
+    }
+    log_tray("service_stop: end");
 }
 
 /// 重启：kickstart -k（杀旧进程并重新拉起）。
-fn service_restart() {
-    let _ = launchctl(&["kickstart", "-k", &service_target()]);
+fn service_restart(app: &AppHandle) {
+    log_tray("service_restart: begin");
+    // 重启语义：恢复 KeepAlive=true。
+    if let Err(e) = write_plist(app, AUTOSTART.load(Ordering::Relaxed)) {
+        log_tray(&format!("service_restart: 写 KeepAlive=true plist 失败 {e}"));
+    }
+    let _ = launchctl_logged(&["kickstart", "-k", &service_target()]);
+    log_tray("service_restart: end");
 }
 
 /// 自启开关：重写 plist 的 RunAtLoad 并重新装载；服务保持运行。
@@ -240,12 +342,13 @@ fn set_autostart(app: &AppHandle, enabled: bool) {
     AUTOSTART.store(enabled, Ordering::Relaxed);
     if let Err(e) = write_plist(app, enabled) {
         eprintln!("dsh-tray: 写入 LaunchAgent 失败: {e}");
+        log_tray(&format!("set_autostart: 写入失败 {e}"));
     }
     let plist = plist_path().to_string_lossy().into_owned();
-    let _ = launchctl(&["bootout", &gui_target(), &plist]);
-    let _ = launchctl(&["bootstrap", &gui_target(), &plist]);
+    let _ = launchctl_logged(&["bootout", &gui_target(), &plist]);
+    let _ = launchctl_logged(&["bootstrap", &gui_target(), &plist]);
     if service_is_running() {
-        let _ = launchctl(&["kickstart", &service_target()]);
+        let _ = launchctl_logged(&["kickstart", &service_target()]);
     }
 }
 
@@ -351,23 +454,37 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 
 fn handle_menu(app: &AppHandle, id: &str) {
+    log_tray(&format!("menu: {id}"));
     match id {
         "open" => open_url(WEB_URL),
         "restart" => {
-            if let Err(e) = ensure_plist(app) { eprintln!("dsh-tray: {e}"); }
-            service_restart();
+            if let Err(e) = ensure_plist(app) {
+                eprintln!("dsh-tray: {e}");
+                log_tray(&format!("restart: ensure_plist 失败 {e}"));
+            }
+            service_restart(app);
         }
         "reload" => match control_post("/reload") {
-            Ok(_) => show_action_msg("热重载：已触发".to_string()),
-            Err(e) => show_action_msg(format!("热重载失败：{e}")),
+            Ok(_) => {
+                log_tray("reload: 已触发");
+                show_action_msg("热重载：已触发".to_string());
+            }
+            Err(e) => {
+                log_tray(&format!("reload: 失败 {e}"));
+                show_action_msg(format!("热重载失败：{e}"));
+            }
         },
         "stop" => service_stop(),
         "start" => {
-            if let Err(e) = ensure_plist(app) { eprintln!("dsh-tray: {e}"); }
-            service_start();
+            if let Err(e) = ensure_plist(app) {
+                eprintln!("dsh-tray: {e}");
+                log_tray(&format!("start: ensure_plist 失败 {e}"));
+            }
+            service_start(app);
         }
         "autostart" => {
             let next = !AUTOSTART.load(Ordering::Relaxed);
+            log_tray(&format!("autostart: 切换为 {next}"));
             set_autostart(app, next);
         }
         "log" => {
@@ -403,13 +520,19 @@ fn spawn_status_poller(app: AppHandle) {
             .ok()
             .and_then(|guard| guard.clone())
             .filter(|(_, at)| at.elapsed() < Duration::from_secs(3));
-        let text = match msg {
-            Some((text, _)) => text,
-            None => match probe_status() {
-                DshStatus::Running => "dsh: 运行中".to_string(),
-                DshStatus::Stopped => "dsh: 已停止".to_string(),
-            },
+        let (text, status_changed) = match msg {
+            Some((text, _)) => (text, false),
+            None => {
+                let running = match probe_status() {
+                    DshStatus::Running => true,
+                    DshStatus::Stopped => false,
+                };
+                (if running { "dsh: 运行中".to_string() } else { "dsh: 已停止".to_string() }, true)
+            }
         };
+        if status_changed {
+            log_tray(&format!("status: {}", text));
+        }
         if let Some(tray) = app.tray_by_id("main") {
             let _ = tray.set_tooltip(Some(&text));
         }
@@ -421,22 +544,28 @@ fn spawn_status_poller(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            log_tray("=== dsh-tray 启动 ===");
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             AUTOSTART.store(read_autostart_from_plist(), Ordering::Relaxed);
             if let Err(e) = ensure_plist(app.handle()) {
                 eprintln!("dsh-tray: {e}");
+                log_tray(&format!("setup: ensure_plist 失败 {e}"));
             }
 
             // 打开托盘即确保 dsh 运行：web 端口与控制面端口均不可达时自动拉起。
             // （已运行则跳过；启动是异步的，状态行先给反馈，轮询会跟进真实状态）
             if !port_open(WEB_PORT) && !port_open(CONTROL_PORT) {
-                service_start();
+                log_tray("setup: 3080/3399 均不可达，自动拉起 dsh");
+                service_start(app.handle());
                 show_action_msg("dsh 未运行，已自动启动".to_string());
+            } else {
+                log_tray("setup: dsh 已在运行，跳过自动拉起");
             }
 
             let menu = build_menu(app.handle())?;
+            log_tray("setup: 菜单构建完成");
             app.manage(AppMenu(menu.clone()));
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?)
@@ -445,8 +574,10 @@ pub fn run() {
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| handle_menu(app, event.id.as_ref()))
                 .build(app)?;
+            log_tray("setup: 托盘构建完成");
 
             spawn_status_poller(app.handle().clone());
+            log_tray("setup: 状态轮询已启动");
             Ok(())
         })
         .run(tauri::generate_context!())

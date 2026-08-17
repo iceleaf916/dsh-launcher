@@ -1,13 +1,10 @@
-# dsh-tray-control 控制面插件挂载清单（模板，不含具体路径）。
+# dsh-tray-control 控制面插件挂载清单。
 #
 # 用法：
-#   1. 推荐：托盘应用运行时自动生成真正的 patch 文件——
-#      ~/Library/Application Support/dsh-tray/control.patch.yml
-#      （内容引用 .app 资源内或源码目录内的插件入口，随安装位置变化，无需手改）
-#   2. 开发时手动挂载：把下方 <PLUGIN_INDEX_ABS_PATH> 替换为实际绝对路径后：
-#      dsh --profile web --patch <本文件绝对路径>
+#   1. 推荐：托盘应用运行时自动生成真正的 patch 文件（引用实际插件入口），
+#      路径为 ~/Library/Application Support/dsh-tray/control.patch.yml。
+#   2. 本文件是打包资源内的开发模板，供参考；直接使用会因占位符无效。
+#      打包后实际生效的是运行时生成的 patch。
 #
 # 注意：dsh 的 loader 会把 name 作为模块说明符解析；绝对路径会被转成 file: URL 加载。
-- insert:
-    - id: dsh-tray-control
-      name: '<PLUGIN_INDEX_ABS_PATH>'
+- insert: []
