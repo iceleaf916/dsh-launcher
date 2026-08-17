@@ -166,12 +166,63 @@ fn service_target() -> String {
 
 // ── dsh 可执行解析（plist 用绝对路径，不依赖 launchd 的 PATH） ────────
 
+/// 从登录 shell 解析可执行文件绝对路径。
+/// GUI 启动的 app 环境 PATH 只有系统默认值（无 nvm/Homebrew），
+/// 而 launchctl 的 PATH 也不含用户 shell 配置；用 `zsh -lc` 拿到真实 PATH。
+fn which_from_login_shell(name: &str) -> Option<PathBuf> {
+    for shell in ["zsh", "bash", "sh"] {
+        let out = Command::new(shell).arg("-lc").arg(format!("command -v {name}")).output().ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                let p = PathBuf::from(&s);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 常见安装路径兜底（登录 shell 可能因慢/异常失败，或 PATH 不含这些位置）。
+fn which_from_common_paths(name: &str) -> Option<PathBuf> {
+    let home = home_dir();
+    let candidates = [
+        home.join(".nvm/versions/node").join("current/bin").join(name),
+        home.join(".local/bin").join(name),
+        PathBuf::from("/opt/homebrew/bin").join(name),
+        PathBuf::from("/usr/local/bin").join(name),
+    ];
+    // nvm 下可能有多个版本目录：取版本号最大的那个（与 node 同目录）。
+    let nvm_root = home.join(".nvm/versions/node");
+    if let Ok(entries) = fs::read_dir(&nvm_root) {
+        let mut versions: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join(name).is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        versions.sort();
+        if let Some(v) = versions.last() {
+            let p = nvm_root.join(v).join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 fn which(name: &str) -> Option<PathBuf> {
-    let out = Command::new("sh").arg("-lc").arg(format!("command -v {name}")).output().ok()?;
-    if !out.status.success() { return None; }
-    let s = String::from_utf8(out.stdout).ok()?;
-    let p = PathBuf::from(s.trim());
-    if p.as_os_str().is_empty() { None } else { Some(p) }
+    which_from_login_shell(name)
+        .or_else(|| which_from_common_paths(name))
+}
+
+/// node 与 dsh 必须来自同一目录（nvm 版本一致性）：若 dsh 由常见路径解析出，
+/// 则 node 优先取同目录；否则退回登录 shell/常见路径解析 node。
+fn node_for_dsh(dsh: &PathBuf) -> Option<PathBuf> {
+    let same_dir = dsh.parent().map(|dir| dir.join("node")).filter(|p| p.is_file());
+    same_dir.or_else(|| which("node"))
 }
 
 /// 控制面插件目录。
@@ -209,8 +260,8 @@ fn control_patch_path(app: &AppHandle) -> PathBuf {
 /// [node, dsh_bin, --profile, web, --patch, <控制面 patch 路径>]
 /// node/dsh 一律运行时解析（PATH），解析失败返回错误——不写死任何安装路径。
 fn dsh_program(app: &AppHandle) -> Result<Vec<String>, String> {
-    let node = which("node").ok_or_else(|| "node 不在 PATH，无法生成 LaunchAgent".to_string())?;
-    let dsh = which("dsh").ok_or_else(|| "dsh 不在 PATH，无法生成 LaunchAgent".to_string())?;
+    let dsh = which("dsh").ok_or_else(|| "dsh 不在 PATH，无法生成 LaunchAgent（已尝试登录 shell 与常见安装路径）".to_string())?;
+    let node = node_for_dsh(&dsh).ok_or_else(|| "node 不在 PATH，无法生成 LaunchAgent（已尝试登录 shell 与常见安装路径）".to_string())?;
     let patch = control_patch_path(app);
     let program = vec![
         node.to_string_lossy().into_owned(),
