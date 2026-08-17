@@ -77,16 +77,48 @@ fn which(name: &str) -> Option<PathBuf> {
     if p.as_os_str().is_empty() { None } else { Some(p) }
 }
 
+/// 控制面插件目录：dev 优先源码目录（存在即用），打包后回退 bundle 资源目录。
+fn control_dir(app: &AppHandle) -> PathBuf {
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins/dsh-tray-control");
+    if dev.join("lib/index.js").exists() {
+        return dev;
+    }
+    let bundled = app
+        .path()
+        .resource_dir()
+        .unwrap_or_default()
+        .join("dsh-tray-control");
+    if bundled.join("lib/index.js").exists() {
+        bundled
+    } else {
+        dev
+    }
+}
+
+/// 控制面 patch 路径：动态生成到 ~/Library/Application Support/dsh-tray/，
+/// 内容引用实际插件入口（bundle 内或源码目录），解决打包后绝对路径失效问题。
+fn control_patch_path(app: &AppHandle) -> PathBuf {
+    let dir = home_dir().join("Library/Application Support/dsh-tray");
+    let _ = fs::create_dir_all(&dir);
+    let patch = dir.join("control.patch.yml");
+    let plugin_index = control_dir(app).join("lib/index.js");
+    let content = format!(
+        "# 由 dsh-tray 自动生成，请勿手改。\n- insert:\n    - id: dsh-tray-control\n      name: '{}'\n",
+        plugin_index.to_string_lossy()
+    );
+    let _ = fs::write(&patch, content);
+    patch
+}
+
 /// [node, dsh_bin, --profile, web, --patch, <控制面 patch 路径>]
-fn dsh_program() -> Vec<String> {
+fn dsh_program(app: &AppHandle) -> Vec<String> {
     let node = which("node").unwrap_or_else(|| {
         PathBuf::from("/Users/iceleaf/.nvm/versions/node/v24.18.0/bin/node")
     });
     let dsh = which("dsh").unwrap_or_else(|| {
         PathBuf::from("/Users/iceleaf/.nvm/versions/node/v24.18.0/bin/dsh")
     });
-    let patch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../plugins/dsh-tray-control/cordis.patch.yml");
+    let patch = control_patch_path(app);
     vec![
         node.to_string_lossy().into_owned(),
         dsh.to_string_lossy().into_owned(),
@@ -103,8 +135,8 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn plist_xml(run_at_load: bool) -> String {
-    let program = dsh_program();
+fn plist_xml(app: &AppHandle, run_at_load: bool) -> String {
+    let program = dsh_program(app);
     let args = program
         .iter()
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
@@ -140,19 +172,19 @@ fn plist_xml(run_at_load: bool) -> String {
     )
 }
 
-fn ensure_plist() -> std::io::Result<()> {
+fn ensure_plist(app: &AppHandle) -> std::io::Result<()> {
     let path = plist_path();
     if !path.exists() {
         if let Some(dir) = path.parent() { fs::create_dir_all(dir)?; }
-        fs::write(&path, plist_xml(AUTOSTART.load(Ordering::Relaxed)))?;
+        fs::write(&path, plist_xml(app, AUTOSTART.load(Ordering::Relaxed)))?;
     }
     Ok(())
 }
 
-fn write_plist(run_at_load: bool) -> std::io::Result<()> {
+fn write_plist(app: &AppHandle, run_at_load: bool) -> std::io::Result<()> {
     let path = plist_path();
     if let Some(dir) = path.parent() { fs::create_dir_all(dir)?; }
-    fs::write(&path, plist_xml(run_at_load))
+    fs::write(&path, plist_xml(app, run_at_load))
 }
 
 /// 从已存在的 plist 读取 RunAtLoad（自启状态）。
@@ -201,9 +233,9 @@ fn service_restart() {
 }
 
 /// 自启开关：重写 plist 的 RunAtLoad 并重新装载；服务保持运行。
-fn set_autostart(enabled: bool) {
+fn set_autostart(app: &AppHandle, enabled: bool) {
     AUTOSTART.store(enabled, Ordering::Relaxed);
-    let _ = write_plist(enabled);
+    let _ = write_plist(app, enabled);
     let plist = plist_path().to_string_lossy().into_owned();
     let _ = launchctl(&["bootout", &gui_target(), &plist]);
     let _ = launchctl(&["bootstrap", &gui_target(), &plist]);
@@ -280,12 +312,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 fn handle_menu(app: &AppHandle, id: &str) {
     match id {
         "open" => open_url(WEB_URL),
-        "restart" => { let _ = ensure_plist(); service_restart(); }
+        "restart" => { let _ = ensure_plist(app); service_restart(); }
         "stop" => service_stop(),
-        "start" => { let _ = ensure_plist(); service_start(); }
+        "start" => { let _ = ensure_plist(app); service_start(); }
         "autostart" => {
             let next = !AUTOSTART.load(Ordering::Relaxed);
-            set_autostart(next);
+            set_autostart(app, next);
         }
         "log" => {
             if !log_path().exists() {
@@ -334,7 +366,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             AUTOSTART.store(read_autostart_from_plist(), Ordering::Relaxed);
-            let _ = ensure_plist();
+            let _ = ensure_plist(app.handle());
 
             let menu = build_menu(app.handle())?;
             app.manage(AppMenu(menu.clone()));
