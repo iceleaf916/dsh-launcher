@@ -36,11 +36,14 @@ cd src-tauri && cargo run
 
 ```bash
 pnpm tauri build
-# .app: src-tauri/target/release/bundle/macos/DSH启动器.app
-# dmg:  src-tauri/target/release/bundle/dmg/DSH启动器_<version>_aarch64.dmg
+# .app: src-tauri/target/release/bundle/macos/dsh-launcher.app
+# dmg:  src-tauri/target/release/bundle/dmg/dsh-launcher_<version>_aarch64.dmg
 ```
 
 拖入 /Applications 即可。注意：dmg 打包依赖 `hdiutil`（系统级磁盘映像操作），在受限沙箱/CI 里会失败；此时用 `pnpm tauri build --bundles app` 只产出 .app。
+
+macOS 产物文件名为英文（`dsh-launcher.app` / `dsh-launcher_<version>_aarch64.dmg`），
+通过 `src-tauri/Info.plist` 覆盖 `CFBundleDisplayName` 为“DSH启动器”，因此 Dock / Finder 中显示中文名。
 
 **插件无需单独安装**：控制面插件已打进 .app 资源（`Contents/Resources/dsh-control/`），托盘启动 dsh 时自动把 `--patch` 写进 LaunchAgent（patch 文件动态生成于 `~/Library/Application Support/dsh-launcher/control.patch.yml`，内容引用实际插件路径），全程零侵入 `~/.dsh/profiles/web`。
 
@@ -51,6 +54,7 @@ DSH启动器（dsh-launcher）/
 ├── src-tauri/                # Tauri 2 Rust 端
 │   ├── src/lib.rs            # 托盘菜单 + launchctl 控制 + 状态轮询 + 打包路径解析
 │   ├── src/main.rs
+│   ├── Info.plist            # macOS 显示名覆盖（DSH启动器）
 │   ├── tauri.conf.json       # 无窗口配置 + bundle.resources（插件打进 .app）
 │   └── icons/                # 全套图标（gen-icon.py 生成源图）
 ├── src/index.html            # 前端占位（无窗口，永不渲染）
