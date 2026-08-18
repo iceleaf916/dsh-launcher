@@ -920,6 +920,23 @@ fn open_builtin(app: &AppHandle) {
     )
     .title("dsh 界面")
     .inner_size(1100.0, 760.0)
+    // 内置浏览器需要 Tauri IPC：dsh-notification 插件走 Web Notification API，
+    // 官方 tauri-plugin-notification 会注入 window.Notification polyfill，
+    // polyfill 内部调用 `plugin:notification|notify` 命令。远端页面默认禁止
+    // IPC，必须显式声明 remote 能力。
+    .initialization_script(
+        r#"
+        (function () {
+          try {
+            if (window.__TAURI_INTERNALS__) {
+              window.__dsh_builtin_toolkit__ = true;
+            }
+          } catch (err) {
+            console.warn("[dsh-launcher] builtin toolkit init failed:", err);
+          }
+        })();
+        "#,
+    )
     .build()
     {
         Ok(win) => {
@@ -1115,6 +1132,7 @@ fn spawn_status_poller(app: AppHandle) {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             log_tray("=== dsh-launcher 启动 ===");
             #[cfg(target_os = "macos")]

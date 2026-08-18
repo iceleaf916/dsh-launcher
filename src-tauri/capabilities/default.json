@@ -1,7 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "DSH启动器 托盘应用默认能力（无窗口、无前端 IPC）",
-  "windows": [],
-  "permissions": []
+  "identifier": "builtin-webview",
+  "description": "内置浏览器（dsh-ui 窗口）能力：允许 127.0.0.1:3080 上的 dsh web 页面调用通知插件，用于 dsh-notification 的桌面通知",
+  "windows": ["dsh-ui"],
+  "remote": {
+    "urls": ["http://127.0.0.1:3080"]
+  },
+  "permissions": ["notification:default"]
 }

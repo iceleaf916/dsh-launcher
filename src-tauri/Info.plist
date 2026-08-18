@@ -4,5 +4,7 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>DSH启动器</string>
+	<key>NSUserNotificationUsageDescription</key>
+	<string>DSH 任务完成时通过系统通知提醒您。</string>
 </dict>
 </plist>
