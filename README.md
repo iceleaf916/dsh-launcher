@@ -26,7 +26,20 @@ dsh（DeepSeek Harness）的系统托盘启动器：通过菜单栏控制 `dsh -
 
 1. 从 [GitHub Releases](https://github.com/iceleaf916/dsh-launcher/releases) 下载 `dsh-launcher_<version>_aarch64.dmg`
 2. 打开 dmg，将 `dsh-launcher.app` 拖入 `/Applications`
-3. 首次启动时，若 dsh 未运行会自动拉起；之后可通过菜单栏控制
+3. 由于当前发布包未进行 Apple 官方签名（未加入 Apple Developer Program），
+   首次打开前需要手动移除隔离属性，否则 macOS 会拦截启动：
+
+```bash
+# 方式一：先解除 Gatekeeper 隔离再首次启动（推荐）
+xattr -dr com.apple.quarantine /Applications/dsh-launcher.app
+
+# 方式二：首次启动时在“访达”中右键点击 dsh-launcher.app → 打开 → 再点“打开”
+```
+
+4. 首次启动时，若 dsh 未运行会自动拉起；之后可通过菜单栏控制
+
+> 说明：`xattr -dr` 会移除整个应用的隔离标记。若系统提示“无法验证开发者”，
+> 执行该命令后重新打开即可；如仍被拦截，可在“系统设置 → 隐私与安全性”中点击“仍要打开”。
 
 ### Linux (Debian/Ubuntu)
 
