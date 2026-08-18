@@ -107,11 +107,12 @@ src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/dsh-launcher_<versi
 
 ### CI 构建
 
-仓库内置 [build-deb workflow](.github/workflows/build-deb.yml)：
+仓库内置 [release workflow](.github/workflows/release.yml)：
 
 - 手动触发（`workflow_dispatch`）或在 `v*` tag 推送时自动触发
-- 自动执行 Linux `cargo check` + 构建 x86_64 deb，并上传构建产物
-- 打 tag 时额外把 deb 附到 GitHub Release
+- Linux job：`cargo check` + 构建 x86_64 deb
+- macOS job：构建 aarch64 dmg
+- 打 tag 时自动创建 GitHub Release 并附上 deb + dmg 产物
 
 ## 卸载
 
