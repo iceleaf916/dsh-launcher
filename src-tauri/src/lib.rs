@@ -208,6 +208,47 @@ fn which_from_login_shell(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// 从登录 shell 读取完整 PATH。
+/// launchd 只给 `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，但 dsh 的
+/// 子进程（MCP stdio：npx/codegraph/uvx 等）依赖用户完整 PATH；
+/// 服务定义必须把这份 PATH 固化进 plist/systemd unit。
+/// 失败时回退到当前进程 PATH（GUI 下通常只有系统目录，但优于空值）。
+fn login_shell_path() -> Option<String> {
+    for shell in ["zsh", "bash", "sh"] {
+        let out = Command::new(shell)
+            .arg("-lc")
+            .arg("printf '%s' \"$PATH\"")
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    std::env::var("PATH").ok().filter(|p| !p.is_empty())
+}
+
+/// 服务子进程环境：完整 PATH + TERM=dumb（与 dsh 内部 bash 工具约定一致）。
+/// 只在 plist/systemd unit 里写入这两个键，避免把 GUI 会话的
+/// 其他环境变量（SSH_AUTH_SOCK 等）固化到服务里。
+fn service_env() -> Vec<(String, String)> {
+    let path = login_shell_path()
+        .map(|p| {
+            log_tray(&format!("service_env: 登录 shell PATH={p}"));
+            p
+        })
+        .unwrap_or_else(|| {
+            log_tray("service_env: 登录 shell PATH 解析失败，回退当前进程 PATH");
+            std::env::var("PATH").unwrap_or_default()
+        });
+    vec![
+        ("PATH".to_string(), path),
+        ("TERM".to_string(), "dumb".to_string()),
+    ]
+}
+
 /// 常见安装路径兜底（登录 shell 可能因慢/异常失败，或 PATH 不含这些位置）。
 fn which_from_common_paths(name: &str) -> Option<PathBuf> {
     let home = home_dir();
@@ -343,6 +384,13 @@ mod macos_service {
             .map(|a| format!("    <string>{}</string>", xml_escape(a)))
             .collect::<Vec<_>>()
             .join("\n");
+        // dsh 子进程（MCP stdio 等）继承 launchd 环境；launchd 默认 PATH
+        // 只有系统目录，必须把用户完整 PATH 与 TERM 固化进 plist。
+        let env = service_env()
+            .iter()
+            .map(|(k, v)| format!("    <key>{}</key>\n    <string>{}</string>", xml_escape(k), xml_escape(v)))
+            .collect::<Vec<_>>()
+            .join("\n");
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -354,6 +402,10 @@ mod macos_service {
   <array>
 {args}
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+{env}
+  </dict>
   <key>KeepAlive</key>
   <{keep_alive}/>
   <key>RunAtLoad</key>
@@ -421,8 +473,47 @@ mod macos_service {
                 return Err(e.to_string());
             }
             log_tray(&format!("ensure_definition: 已写入 plist ({})", xml.len()));
+        } else if !plist_has_env(&path) {
+            // 旧版 plist 没有 EnvironmentVariables：dsh 子进程拿不到用户 PATH，
+            // MCP stdio（npx/codegraph/uvx）等会启动失败。自动升级并重载，
+            // 保持 KeepAlive/RunAtLoad 现状（用户停止过服务时不被重新拉起）。
+            log_tray("ensure_definition: 检测到旧版 plist（缺 EnvironmentVariables），升级");
+            let run_at_load = read_autostart();
+            let keep_alive = read_keepalive();
+            let xml = plist_xml(app, run_at_load, keep_alive)?;
+            if let Err(e) = fs::write(&path, &xml) {
+                log_tray(&format!("ensure_definition: 升级写入失败 {e}"));
+                return Err(e.to_string());
+            }
+            log_tray("ensure_definition: 旧版 plist 已升级，重新装载");
+            let plist = path.to_string_lossy().into_owned();
+            let _ = launchctl_logged(&["bootout", &gui_target(), &plist]);
+            let _ = launchctl_logged(&["bootstrap", &gui_target(), &plist]);
+            if service_is_running() {
+                let _ = launchctl_logged(&["kickstart", &service_target()]);
+            }
         }
         Ok(())
+    }
+
+    /// 旧 plist 升级检测：是否已包含 EnvironmentVariables 键。
+    fn plist_has_env(path: &PathBuf) -> bool {
+        fs::read_to_string(path)
+            .map(|xml| xml.contains("<key>EnvironmentVariables</key>"))
+            .unwrap_or(false)
+    }
+
+    /// 从已存在的 plist 读取 KeepAlive（保持用户停止/启动语义，升级时不被覆盖）。
+    fn read_keepalive() -> bool {
+        fs::read_to_string(plist_path())
+            .map(|xml| {
+                let marker = "<key>KeepAlive</key>";
+                match xml.find(marker) {
+                    Some(i) => xml[i + marker.len()..].trim_start().starts_with("<true/>"),
+                    None => true,
+                }
+            })
+            .unwrap_or(true)
     }
 
     fn write_plist(app: &AppHandle, run_at_load: bool) -> Result<(), String> {
@@ -589,6 +680,13 @@ mod linux_service {
             .map(|a| format!("      {:?}", a))
             .collect::<Vec<_>>()
             .join("\n");
+        // dsh 子进程（MCP stdio 等）继承 systemd user 环境；systemd 默认
+        // 不继承登录会话 PATH，必须把用户完整 PATH 与 TERM 固化进 unit。
+        let env = service_env()
+            .iter()
+            .map(|(k, v)| format!("Environment={}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n");
         let log = log_path();
         Ok(format!(
             "# 由 dsh-launcher 自动生成，请勿手改。\n\
@@ -599,6 +697,7 @@ mod linux_service {
              [Service]\n\
              Type=simple\n\
              ExecStart={args}\n\
+             {env}\n\
              Restart=always\n\
              RestartSec=2\n\
              StandardOutput=append:{log}\n\
@@ -606,6 +705,7 @@ mod linux_service {
              [Install]\n\
              WantedBy=default.target\n",
             args = args,
+            env = env,
             log = log.to_string_lossy(),
         ))
     }
@@ -633,6 +733,19 @@ mod linux_service {
         ));
         if !path.exists() {
             write_unit(app, AUTOSTART.load(Ordering::Relaxed))?;
+        } else {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            if !content.contains("Environment=PATH=") {
+                // 旧版 unit 没有 Environment：dsh 子进程拿不到用户 PATH，
+                // MCP stdio（npx/codegraph/uvx）等会启动失败。自动升级。
+                log_tray("ensure_definition: 检测到旧版 unit（缺 Environment=PATH=），升级");
+                write_unit(app, AUTOSTART.load(Ordering::Relaxed))?;
+                let _ = systemctl_logged(&["daemon-reload"]);
+                // 服务若在运行，重启一次让新环境生效。
+                if service_is_running() {
+                    let _ = systemctl_logged(&["restart", UNIT_NAME]);
+                }
+            }
         }
         Ok(())
     }
