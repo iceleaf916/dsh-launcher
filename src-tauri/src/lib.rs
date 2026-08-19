@@ -890,6 +890,16 @@ fn open_path(path: &PathBuf) {
     let _ = Command::new("xdg-open").arg(path).spawn();
 }
 
+/// 用系统默认浏览器打开 http(s) 链接；其他协议（about:/data:/javascript: 等）忽略。
+/// 内置浏览器里新窗口/外部链接统一走这里，避免 WebView 内无响应。
+fn open_external(url: &str) {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        log_tray(&format!("open_external: {url}"));
+        open_url(url);
+    }
+}
+
 /// 打开 dsh 界面：按配置走系统浏览器或内置 WebView。
 fn open_dsh_ui(app: &AppHandle) {
     if OPEN_MODE.load(Ordering::Relaxed) {
@@ -937,6 +947,12 @@ fn open_builtin(app: &AppHandle) {
         })();
         "#,
     )
+    // 新窗口请求（window.open / <a target="_blank">）：WebView 默认无响应，
+    // 转交系统默认浏览器打开。
+    .on_new_window(|url, _features| {
+        open_external(url.as_str());
+        tauri::webview::NewWindowResponse::Deny
+    })
     .build()
     {
         Ok(win) => {

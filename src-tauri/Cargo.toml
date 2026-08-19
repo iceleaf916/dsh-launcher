@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "0.5.0"
+version = "0.5.1"
 description = "DSH 启动器（DSH launcher）"
 edition = "2021"
 
