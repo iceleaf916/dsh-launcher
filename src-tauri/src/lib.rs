@@ -5,12 +5,10 @@
 //      macOS  -> launchd (LaunchAgent)：KeepAlive 崩溃自愈，RunAtLoad 默认关（自启默认关）。
 //      Linux  -> systemd user service：Restart=always 崩溃自愈，enable 对应登录自启。
 //  - 本应用是纯托盘控制台（无窗口）：状态轮询 + 服务控制 + 菜单。
-//  - 控制面插件 dsh-control 通过 `dsh web --patch <cordis.patch.yml>` 挂载，
-//    暴露 127.0.0.1:3399 状态/优雅停机端点（零侵入 profile）。
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     process::Command,
@@ -32,7 +30,6 @@ use tauri::{
 
 const WEB_URL: &str = "http://127.0.0.1:3080";
 const WEB_PORT: u16 = 3080;
-const CONTROL_PORT: u16 = 3399; // dsh-control 插件端口
 #[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "com.dsh-launcher.web";
 const STATUS_POLL_MS: u64 = 2000;
@@ -295,68 +292,26 @@ fn node_for_dsh(dsh: &PathBuf) -> Option<PathBuf> {
     same_dir.or_else(|| which("node"))
 }
 
-/// 控制面插件目录。
-/// - debug 构建（开发）：优先源码目录（编译期路径，release 二进制不含）。
-/// - release 构建（发布）：一律从 .app 资源目录解析。
-fn control_dir(app: &AppHandle) -> PathBuf {
-    #[cfg(debug_assertions)]
-    {
-        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins/dsh-control");
-        if dev.join("lib/index.js").exists() {
-            return dev;
-        }
-    }
-    app.path()
-        .resource_dir()
-        .unwrap_or_default()
-        .join("dsh-control")
-}
-
-/// 控制面 patch 路径：动态生成到平台配置目录，内容引用实际插件入口
-/// （bundle 内或源码目录），解决打包后绝对路径失效问题。
-fn control_patch_path(app: &AppHandle) -> PathBuf {
-    let dir = config_dir();
-    let _ = fs::create_dir_all(&dir);
-    let patch = dir.join("control.patch.yml");
-    let plugin_index = control_dir(app).join("lib/index.js");
-    log_tray(&format!(
-        "control_patch_path: plugin_index={} patch={}",
-        plugin_index.display(),
-        patch.display()
-    ));
-    let content = format!(
-        "# 由 dsh-launcher 自动生成，请勿手改。\n- insert:\n    - id: dsh-control\n      name: '{}'\n",
-        plugin_index.to_string_lossy()
-    );
-    if let Err(e) = fs::write(&patch, content) {
-        log_tray(&format!("control_patch_path: 写入失败 {e}"));
-    }
-    patch
-}
-
-/// [node, dsh_bin, --profile, web, --patch, <控制面 patch 路径>]
+/// [node, dsh_bin, --profile, web, --no-open]
 /// node/dsh 一律运行时解析（PATH），解析失败返回错误——不写死任何安装路径。
-fn dsh_program(app: &AppHandle) -> Result<Vec<String>, String> {
+fn dsh_program(_app: &AppHandle) -> Result<Vec<String>, String> {
     let dsh = which("dsh").ok_or_else(|| {
         "dsh 不在 PATH，无法生成服务定义（已尝试登录 shell 与常见安装路径）".to_string()
     })?;
     let node = node_for_dsh(&dsh).ok_or_else(|| {
         "node 不在 PATH，无法生成服务定义（已尝试登录 shell 与常见安装路径）".to_string()
     })?;
-    let patch = control_patch_path(app);
     let program = vec![
         node.to_string_lossy().into_owned(),
         dsh.to_string_lossy().into_owned(),
         "--profile".into(),
         "web".into(),
-        "--patch".into(),
-        patch.to_string_lossy().into_owned(),
+        "--no-open".into(),
     ];
     log_tray(&format!(
-        "dsh_program: node={} dsh={} patch={}",
+        "dsh_program: node={} dsh={}",
         node.display(),
-        dsh.display(),
-        patch.display()
+        dsh.display()
     ));
     Ok(program)
 }
@@ -388,7 +343,13 @@ mod macos_service {
         // 只有系统目录，必须把用户完整 PATH 与 TERM 固化进 plist。
         let env = service_env()
             .iter()
-            .map(|(k, v)| format!("    <key>{}</key>\n    <string>{}</string>", xml_escape(k), xml_escape(v)))
+            .map(|(k, v)| {
+                format!(
+                    "    <key>{}</key>\n    <string>{}</string>",
+                    xml_escape(k),
+                    xml_escape(v)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         Ok(format!(
@@ -831,36 +792,8 @@ fn show_action_msg(msg: String) {
     }
 }
 
-/// 向控制面插件发 POST（当前仅 /reload；连接失败视为 dsh 未运行或插件未挂载）。
-fn control_post(path: &str) -> Result<String, String> {
-    let addr: SocketAddr = format!("127.0.0.1:{CONTROL_PORT}").parse().unwrap();
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
-        .map_err(|e| format!("控制面不可达（dsh 未运行或插件未挂载）: {e}"))?;
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{CONTROL_PORT}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    let status_line = text.lines().next().unwrap_or("").to_string();
-    let code: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    if (200..300).contains(&code) {
-        Ok(status_line)
-    } else {
-        Err(format!("控制面返回 {status_line}"))
-    }
-}
-
 fn probe_status() -> DshStatus {
-    // 控制面端口在则 dsh 一定在；兜底看 web 端口。
-    if port_open(CONTROL_PORT) || port_open(WEB_PORT) {
+    if port_open(WEB_PORT) {
         DshStatus::Running
     } else {
         DshStatus::Stopped
@@ -994,7 +927,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         None::<&str>,
     )?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh", true, None::<&str>)?;
-    let reload = MenuItem::with_id(app, "reload", "热重载 dsh（控制面）", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止 dsh", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动 dsh", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
@@ -1015,7 +947,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &builtin,
             &PredefinedMenuItem::separator(app)?,
             &restart,
-            &reload,
             &stop,
             &start,
             &PredefinedMenuItem::separator(app)?,
@@ -1050,16 +981,6 @@ fn handle_menu(app: &AppHandle, id: &str) {
             #[cfg(target_os = "linux")]
             linux_service::service_restart(app);
         }
-        "reload" => match control_post("/reload") {
-            Ok(_) => {
-                log_tray("reload: 已触发");
-                show_action_msg("热重载：已触发".to_string());
-            }
-            Err(e) => {
-                log_tray(&format!("reload: 失败 {e}"));
-                show_action_msg(format!("热重载失败：{e}"));
-            }
-        },
         "stop" => {
             #[cfg(target_os = "macos")]
             macos_service::service_stop();
@@ -1175,10 +1096,10 @@ pub fn run() {
                 log_tray(&format!("setup: 服务定义失败 {e}"));
             }
 
-            // 打开托盘即确保 dsh 运行：web 端口与控制面端口均不可达时自动拉起。
+            // 打开托盘即确保 dsh 运行：web 端口不可达时自动拉起。
             // （已运行则跳过；启动是异步的，状态行先给反馈，轮询会跟进真实状态）
-            if !port_open(WEB_PORT) && !port_open(CONTROL_PORT) {
-                log_tray("setup: 3080/3399 均不可达，自动拉起 dsh");
+            if !port_open(WEB_PORT) {
+                log_tray("setup: 3080 不可达，自动拉起 dsh");
                 #[cfg(target_os = "macos")]
                 macos_service::service_start(app.handle());
                 #[cfg(target_os = "linux")]
