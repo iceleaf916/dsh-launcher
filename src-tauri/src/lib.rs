@@ -4,7 +4,7 @@
 //  - dsh web 进程由系统服务托管：
 //      macOS  -> launchd (LaunchAgent)：KeepAlive 崩溃自愈，RunAtLoad 默认关（自启默认关）。
 //      Linux  -> systemd user service：Restart=always 崩溃自愈，enable 对应登录自启。
-//  - 本应用是纯托盘控制台（无窗口）：状态轮询 + 服务控制 + 菜单。
+//  - 本应用是托盘控制台 + 内置 dsh WebView：状态轮询 + 服务控制 + 菜单。
 
 use std::{
     fs,
@@ -20,6 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -30,36 +31,15 @@ use tauri::{
 
 const WEB_URL: &str = "http://127.0.0.1:3080";
 const WEB_PORT: u16 = 3080;
+const STARTUP_UI_WAIT_MS: u64 = 10000;
+const DEFAULT_WINDOW_WIDTH: f64 = 1400.0;
+const DEFAULT_WINDOW_HEIGHT: f64 = 900.0;
+const WINDOW_SIZE_SAVE_DELAY_MS: u64 = 1000;
 #[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "com.dsh-launcher.web";
 const STATUS_POLL_MS: u64 = 2000;
 
 static AUTOSTART: AtomicBool = AtomicBool::new(false);
-
-/// 打开 dsh 界面方式：system=系统浏览器；builtin=托盘内置浏览器。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OpenMode {
-    System,
-    Builtin,
-}
-
-impl OpenMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            OpenMode::System => "system",
-            OpenMode::Builtin => "builtin",
-        }
-    }
-}
-
-fn open_mode_from_str(s: &str) -> OpenMode {
-    match s {
-        "builtin" => OpenMode::Builtin,
-        _ => OpenMode::System,
-    }
-}
-
-static OPEN_MODE: AtomicBool = AtomicBool::new(false); // false=system, true=builtin
 
 /// 托盘菜单句柄（存进 Tauri state，供后台状态轮询线程更新）。
 struct AppMenu(Menu<tauri::Wry>);
@@ -72,7 +52,7 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// 平台配置根目录（不含应用名）。
+/// 平台配置根目录（不含应用名），也用于 Linux systemd user unit 路径。
 #[cfg(target_os = "macos")]
 fn config_root() -> PathBuf {
     home_dir().join("Library/Application Support")
@@ -100,46 +80,77 @@ fn state_root() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".local/state"))
 }
 
-/// 本应用配置目录：macOS `~/Library/Application Support/dsh-launcher`，
-/// Linux `$XDG_CONFIG_HOME/dsh-launcher`（默认 `~/.config/dsh-launcher`）。
-fn config_dir() -> PathBuf {
-    config_root().join("dsh-launcher")
-}
-
 /// 本应用状态/日志目录：macOS `~/Library/Logs`，
 /// Linux `$XDG_STATE_HOME/dsh-launcher`（默认 `~/.local/state/dsh-launcher`）。
 fn state_dir() -> PathBuf {
     state_root().join("dsh-launcher")
 }
 
-fn config_path() -> PathBuf {
-    config_dir().join("config.json")
+fn config_dir() -> PathBuf {
+    config_root().join("dsh-launcher")
 }
 
-fn load_open_mode() -> OpenMode {
-    let raw = fs::read_to_string(config_path()).unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&raw)
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct WindowSize {
+    width: f64,
+    height: f64,
+}
+
+impl Default for WindowSize {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WINDOW_WIDTH,
+            height: DEFAULT_WINDOW_HEIGHT,
+        }
+    }
+}
+
+impl WindowSize {
+    fn is_valid(self) -> bool {
+        self.width.is_finite()
+            && self.height.is_finite()
+            && self.width >= 320.0
+            && self.height >= 240.0
+            && self.width <= 10000.0
+            && self.height <= 10000.0
+    }
+}
+
+fn window_size_path() -> PathBuf {
+    config_dir().join("window-size.json")
+}
+
+fn load_window_size() -> WindowSize {
+    fs::read_to_string(window_size_path())
         .ok()
-        .and_then(|v| {
-            v.get("open_mode")
-                .and_then(|m| m.as_str())
-                .map(open_mode_from_str)
-        })
-        .unwrap_or(OpenMode::System)
+        .and_then(|raw| serde_json::from_str::<WindowSize>(&raw).ok())
+        .filter(|size| size.is_valid())
+        .unwrap_or_default()
 }
 
-fn save_open_mode(mode: OpenMode) {
-    let value = serde_json::json!({ "open_mode": mode.as_str() });
-    if let Some(dir) = config_path().parent() {
+fn save_window_size(size: WindowSize) {
+    if !size.is_valid() {
+        return;
+    }
+    if let Some(dir) = window_size_path().parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Err(e) = fs::write(
-        config_path(),
-        serde_json::to_string_pretty(&value).unwrap_or_default(),
-    ) {
-        log_tray(&format!("save_open_mode: 写入失败 {e}"));
-    } else {
-        log_tray(&format!("save_open_mode: open_mode={}", mode.as_str()));
+    match serde_json::to_string_pretty(&size) {
+        Ok(raw) => {
+            if let Err(e) = fs::write(window_size_path(), raw) {
+                log_tray(&format!("save_window_size: 写入失败 {e}"));
+            }
+        }
+        Err(e) => log_tray(&format!("save_window_size: 序列化失败 {e}")),
+    }
+}
+
+fn save_window_size_from_physical(width: u32, height: u32, scale_factor: f64) {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        save_window_size(WindowSize {
+            width: f64::from(width) / scale_factor,
+            height: f64::from(height) / scale_factor,
+        });
     }
 }
 
@@ -833,14 +844,9 @@ fn open_external(url: &str) {
     }
 }
 
-/// 打开 dsh 界面：按配置走系统浏览器或内置 WebView。
+/// 打开 dsh 界面：始终使用托盘内置 WebView。
 fn open_dsh_ui(app: &AppHandle) {
-    if OPEN_MODE.load(Ordering::Relaxed) {
-        open_builtin(app);
-    } else {
-        log_tray("open_dsh_ui: 使用系统浏览器");
-        open_url(WEB_URL);
-    }
+    open_builtin(app);
 }
 
 /// 内置浏览器：WebviewWindow 加载 dsh web 界面（无系统 chrome，可复用）。
@@ -856,13 +862,15 @@ fn open_builtin(app: &AppHandle) {
         log_tray("open_builtin: 复用已有窗口");
         return;
     }
+    let window_size = load_window_size();
+    let persist_size_after = Instant::now() + Duration::from_millis(WINDOW_SIZE_SAVE_DELAY_MS);
     match WebviewWindowBuilder::new(
         app,
         "dsh-ui",
         WebviewUrl::External(WEB_URL.parse().unwrap()),
     )
     .title("dsh 界面")
-    .inner_size(1100.0, 760.0)
+    .inner_size(window_size.width, window_size.height)
     // 内置浏览器需要 Tauri IPC：dsh-notification 插件走 Web Notification API，
     // 官方 tauri-plugin-notification 会注入 window.Notification polyfill，
     // polyfill 内部调用 `plugin:notification|notify` 命令。远端页面默认禁止
@@ -893,14 +901,46 @@ fn open_builtin(app: &AppHandle) {
             // 关闭窗口只隐藏，不让应用退出（纯托盘应用语义）。
             let win2 = win.clone();
             win.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = win2.hide();
-                    // 窗口隐藏后恢复纯托盘（Accessory），不再占据 Dock / Cmd+Tab。
-                    #[cfg(target_os = "macos")]
-                    let app = win2.app_handle();
-                    #[cfg(target_os = "macos")]
-                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                match event {
+                    tauri::WindowEvent::Resized(size) => {
+                        if Instant::now() >= persist_size_after {
+                            if let Ok(scale_factor) = win2.scale_factor() {
+                                save_window_size_from_physical(
+                                    size.width,
+                                    size.height,
+                                    scale_factor,
+                                );
+                            }
+                        }
+                    }
+                    tauri::WindowEvent::ScaleFactorChanged {
+                        scale_factor,
+                        new_inner_size,
+                        ..
+                    } => {
+                        if Instant::now() >= persist_size_after {
+                            save_window_size_from_physical(
+                                new_inner_size.width,
+                                new_inner_size.height,
+                                *scale_factor,
+                            );
+                        }
+                    }
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        if let (Ok(size), Ok(scale_factor)) =
+                            (win2.inner_size(), win2.scale_factor())
+                        {
+                            save_window_size_from_physical(size.width, size.height, scale_factor);
+                        }
+                        api.prevent_close();
+                        let _ = win2.hide();
+                        // 窗口隐藏后恢复纯托盘（Accessory），不再占据 Dock / Cmd+Tab。
+                        #[cfg(target_os = "macos")]
+                        let app = win2.app_handle();
+                        #[cfg(target_os = "macos")]
+                        let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
+                    _ => {}
                 }
             });
             let _ = win.show();
@@ -913,19 +953,31 @@ fn open_builtin(app: &AppHandle) {
     }
 }
 
+/// 启动后等待 dsh web 服务就绪，再在 Tauri 主线程弹出内置窗口。
+fn spawn_startup_ui(app: AppHandle) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_millis(STARTUP_UI_WAIT_MS);
+        while !port_open(WEB_PORT) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(200));
+        }
+        if port_open(WEB_PORT) {
+            log_tray("startup_ui: dsh 已就绪，准备打开内置窗口");
+        } else {
+            log_tray("startup_ui: 等待 dsh 超时，仍尝试打开内置窗口");
+        }
+
+        let main_app = app.clone();
+        if let Err(e) = app.run_on_main_thread(move || open_dsh_ui(&main_app)) {
+            log_tray(&format!("startup_ui: 调度内置窗口失败 {e}"));
+        }
+    });
+}
+
 // ── 托盘 ──────────────────────────────────────────────────────────────
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let status = MenuItem::with_id(app, "status", "dsh: 检测中…", true, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "打开 dsh 界面", true, None::<&str>)?;
-    let builtin = CheckMenuItem::with_id(
-        app,
-        "open-builtin",
-        "内置浏览器打开",
-        true,
-        OPEN_MODE.load(Ordering::Relaxed),
-        None::<&str>,
-    )?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止 dsh", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动 dsh", true, None::<&str>)?;
@@ -944,7 +996,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &status,
             &open,
-            &builtin,
             &PredefinedMenuItem::separator(app)?,
             &restart,
             &stop,
@@ -962,19 +1013,6 @@ fn handle_menu(app: &AppHandle, id: &str) {
     log_tray(&format!("menu: {id}"));
     match id {
         "open" => open_dsh_ui(app),
-        "open-builtin" => {
-            let next = !OPEN_MODE.load(Ordering::Relaxed);
-            OPEN_MODE.store(next, Ordering::Relaxed);
-            save_open_mode(if next {
-                OpenMode::Builtin
-            } else {
-                OpenMode::System
-            });
-            log_tray(&format!(
-                "open-builtin: 切换为 {}",
-                if next { "内置" } else { "系统" }
-            ));
-        }
         "restart" => {
             #[cfg(target_os = "macos")]
             macos_service::service_restart(app);
@@ -1078,13 +1116,6 @@ pub fn run() {
             AUTOSTART.store(macos_service::read_autostart(), Ordering::Relaxed);
             #[cfg(target_os = "linux")]
             AUTOSTART.store(linux_service::read_autostart(), Ordering::Relaxed);
-            OPEN_MODE.store(
-                match load_open_mode() {
-                    OpenMode::Builtin => true,
-                    OpenMode::System => false,
-                },
-                Ordering::Relaxed,
-            );
             #[cfg(target_os = "macos")]
             if let Err(e) = macos_service::ensure_definition(app.handle()) {
                 eprintln!("dsh-launcher: {e}");
@@ -1125,6 +1156,8 @@ pub fn run() {
 
             spawn_status_poller(app.handle().clone());
             log_tray("setup: 状态轮询已启动");
+            spawn_startup_ui(app.handle().clone());
+            log_tray("setup: 已安排启动时打开内置窗口");
             Ok(())
         })
         .run(tauri::generate_context!())

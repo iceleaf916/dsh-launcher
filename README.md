@@ -1,11 +1,11 @@
 # DSH启动器（dsh-launcher）
 
-dsh（DeepSeek Harness）的系统托盘启动器：通过菜单栏控制 `dsh --profile web` 的启动、停止与重启，并可在内置浏览器或系统浏览器中打开 dsh 界面。
+dsh（DeepSeek Harness）的系统托盘启动器：通过菜单栏控制 `dsh --profile web` 的启动、停止与重启，并在内置浏览器中打开 dsh 界面。
 
 ## 功能
 
 - **启动 / 停止 / 重启 dsh**：菜单栏一键控制 dsh web 服务
-- **打开 dsh 界面**：可在内置浏览器或系统浏览器中打开（菜单“内置浏览器打开”勾选切换）
+- **打开 dsh 界面**：启动应用后自动在托盘内置浏览器中打开，也可从菜单重新打开
 - **开机自启**：勾选“开机自启 dsh”后，登录时自动启动 dsh（默认关闭）
 - **崩溃自愈**：dsh 进程异常退出后会自动拉起（macOS 由 launchd 托管，Linux 由 systemd user service 托管）
 - **状态显示**：菜单栏实时显示 dsh 运行状态（运行中 / 已停止）
@@ -50,13 +50,12 @@ sudo apt install ./dsh-launcher_<version>_amd64.deb
 
 ## 使用
 
-启动后菜单栏出现 DSH 鲸鱼图标，点击展开菜单：
+启动后会自动拉起 dsh 并弹出内置 WebView，同时菜单栏出现 DSH 鲸鱼图标；点击托盘图标可展开菜单：
 
 | 菜单项 | 作用 |
 |---|---|
 | 状态行 | 显示 dsh 运行状态 |
-| 打开 dsh 界面 | 打开 dsh Web 界面（默认系统浏览器） |
-| 内置浏览器打开 | 勾选后改用内置浏览器打开界面 |
+| 打开 dsh 界面 | 在托盘内置浏览器中打开 dsh Web 界面 |
 | 重启 dsh | 重启 dsh 服务 |
 | 停止 dsh / 启动 dsh | 停止 / 启动 dsh 服务 |
 | 开机自启 dsh | 登录时自动启动 dsh（默认关） |
@@ -75,7 +74,7 @@ sudo apt install ./dsh-launcher_<version>_amd64.deb
 
 | 内容 | 路径 |
 |---|---|
-| 托盘配置 | `~/Library/Application Support/dsh-launcher/config.json` |
+| 窗口尺寸 | `~/Library/Application Support/dsh-launcher/window-size.json` |
 | 托盘日志 | `~/Library/Logs/dsh-launcher.log` |
 | dsh 日志 | `~/Library/Logs/dsh-web.log` |
 | LaunchAgent | `~/Library/LaunchAgents/com.dsh-launcher.web.plist` |
@@ -84,7 +83,7 @@ sudo apt install ./dsh-launcher_<version>_amd64.deb
 
 | 内容 | 路径 |
 |---|---|
-| 托盘配置 | `~/.config/dsh-launcher/config.json` |
+| 窗口尺寸 | `~/.config/dsh-launcher/window-size.json` |
 | 托盘日志 | `~/.local/state/dsh-launcher/dsh-launcher.log` |
 | dsh 日志 | `~/.local/state/dsh-launcher/dsh-web.log` |
 | systemd unit | `~/.config/systemd/user/dsh-launcher-web.service` |
